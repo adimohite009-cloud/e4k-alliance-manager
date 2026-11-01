@@ -280,7 +280,11 @@ async function route(request, env, ctx) {
       return reply(request, env, { success: true });
     }
 
-    if (path === '/api/performance-review' && method === 'GET') {\n      return reply(request, env, await rosterPerformanceReview(env));\n    }\n\n    if (path === '/api/stats' && method === 'GET') {
+    if (path === '/api/performance-review' && method === 'GET') {
+      return reply(request, env, await rosterPerformanceReview(env));
+    }
+
+    if (path === '/api/stats' && method === 'GET') {
       const totals = await env.DB.prepare('SELECT COUNT(*) AS totalPlayers, COALESCE(SUM(power),0) AS totalPower, COALESCE(AVG(power),0) AS avgPower FROM players').first();
       const active = await env.DB.prepare("SELECT COUNT(*) AS activePlayers FROM players WHERE status = 'Active'").first();
       return reply(request, env, { totalPlayers: num(totals.totalPlayers), activePlayers: num(active.activePlayers), totalPower: num(totals.totalPower), avgPower: Math.round(num(totals.avgPower)) });
