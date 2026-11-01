@@ -35,6 +35,34 @@ async function bodyJson(request) {
   try { return await request.json(); } catch { return {}; }
 }
 
+
+const PLAYER_COLUMNS = ['id','name','rank','power','kingdom','last_active','contributions','notes','joined_date','status','gge_player_id'];
+const SCORE_COLUMNS = ['id','player_id','event_name','event_date','event_points','glory_points','event_rank','quota','notes'];
+const VAULT_COLUMNS = ['id','castle_name','account_name','password','realm','sitter','notes','created_at','updated_at'];
+
+async function recordActivity(env, entry) {
+  const historyValue = value => {
+    if (entry.entity_type !== 'vault' || !value || typeof value !== 'object') return value;
+    const safe = { ...value };
+    delete safe.password;
+    return safe;
+  };
+  const before = historyValue(entry.before);
+  const after = historyValue(entry.after);
+  await env.DB.prepare('INSERT INTO activity_log (entity_type,entity_id,action,description,before_json,after_json,is_undoable) VALUES (?,?,?,?,?,?,?)')
+    .bind(entry.entity_type, entry.entity_id || null, entry.action, entry.description,
+      before == null ? null : JSON.stringify(before),
+      after == null ? null : JSON.stringify(after),
+      entry.undoable === false ? 0 : 1).run();
+}
+
+async function replaceRow(env, table, columns, row) {
+  const names = columns.join(',');
+  const placeholders = columns.map(() => '?').join(',');
+  await env.DB.prepare('INSERT OR REPLACE INTO ' + table + ' (' + names + ') VALUES (' + placeholders + ')')
+    .bind(...columns.map(column => row[column] ?? null)).run();
+}
+
 async function syncFromGGE(env) {
   const response = await fetch(`${GGE_API}/updates/alliances/${ALLIANCE_ID}/players`, { headers: GGE_HEADERS });
   if (!response.ok) throw new Error(`GGE Tracker returned HTTP ${response.status}`);
@@ -81,6 +109,49 @@ async function route(request, env, ctx) {
     return reply(request, env, { error: 'Password required' }, 401);
 
   try {
+
+    if (path === '/api/activity' && method === 'GET') {
+      const limit = Math.min(100, Math.max(1, num(url.searchParams.get('limit'), 50)));
+      const result = await env.DB.prepare('SELECT id,occurred_at,entity_type,entity_id,action,description,undone_at,is_undoable FROM activity_log ORDER BY id DESC LIMIT ?').bind(limit).all();
+      return reply(request, env, result.results || []);
+    }
+    match = path.match(/^\/api\/activity\/(\d+)\/undo$/);
+    if (match && method === 'POST') {
+      const entry = await env.DB.prepare('SELECT * FROM activity_log WHERE id=?').bind(Number(match[1])).first();
+      if (!entry) return reply(request, env, { error: 'Activity entry not found' }, 404);
+      if (!entry.is_undoable || entry.undone_at) return reply(request, env, { error: 'This change can no longer be undone' }, 409);
+      const later = await env.DB.prepare('SELECT COUNT(*) AS count FROM activity_log WHERE entity_type=? AND entity_id=? AND id>? AND undone_at IS NULL').bind(entry.entity_type, entry.entity_id, entry.id).first();
+      if (num(later?.count) > 0) return reply(request, env, { error: 'Undo newer changes to this record first' }, 409);
+      if (entry.entity_type === 'player' && entry.action === 'created') {
+        const linked = await env.DB.prepare('SELECT COUNT(*) AS count FROM event_scores WHERE player_id=?').bind(entry.entity_id).first();
+        if (num(linked?.count) > 0) return reply(request, env, { error: 'Undo this player’s event scores first' }, 409);
+      }
+      const before = entry.before_json ? JSON.parse(entry.before_json) : null;
+      const after = entry.after_json ? JSON.parse(entry.after_json) : null;
+      const current = after;
+      if (entry.entity_type === 'player') {
+        if (entry.action === 'created') await env.DB.prepare('DELETE FROM players WHERE id=?').bind(entry.entity_id).run();
+        else if (entry.action === 'deleted') {
+          await replaceRow(env, 'players', PLAYER_COLUMNS, before.player);
+          for (const score of before.event_scores || []) await replaceRow(env, 'event_scores', SCORE_COLUMNS, score);
+        } else if (before) await replaceRow(env, 'players', PLAYER_COLUMNS, before);
+      } else if (entry.entity_type === 'score') {
+        if (entry.action === 'created') await env.DB.prepare('DELETE FROM event_scores WHERE id=?').bind(entry.entity_id).run();
+        else if (before) await replaceRow(env, 'event_scores', SCORE_COLUMNS, before);
+      } else if (entry.entity_type === 'vault') {
+        if (entry.action === 'created') await env.DB.prepare('UPDATE castle_accounts SET deleted_at=? WHERE id=?').bind(new Date().toISOString(), entry.entity_id).run();
+        else if (entry.action === 'deleted') await env.DB.prepare('UPDATE castle_accounts SET deleted_at=NULL WHERE id=?').bind(entry.entity_id).run();
+        else if (before) {
+          const current = await env.DB.prepare('SELECT password FROM castle_accounts WHERE id=?').bind(entry.entity_id).first();
+          if (!current) return reply(request, env, { error: 'Vault record no longer exists' }, 409);
+          await replaceRow(env, 'castle_accounts', VAULT_COLUMNS, { ...before, password: current.password });
+        }
+      }
+      await env.DB.prepare('UPDATE activity_log SET undone_at=?,is_undoable=0 WHERE id=?').bind(new Date().toISOString(), entry.id).run();
+      await recordActivity(env, { entity_type: entry.entity_type, entity_id: entry.entity_id, action: 'undo', description: 'Undid: ' + entry.description, before: current, after: before, undoable: false });
+      return reply(request, env, { success: true });
+    }
+
     if (path === '/api/stats' && method === 'GET') {
       const totals = await env.DB.prepare('SELECT COUNT(*) AS totalPlayers, COALESCE(SUM(power),0) AS totalPower, COALESCE(AVG(power),0) AS avgPower FROM players').first();
       const active = await env.DB.prepare("SELECT COUNT(*) AS activePlayers FROM players WHERE status = 'Active'").first();
@@ -119,8 +190,10 @@ async function route(request, env, ctx) {
         if (!player) return reply(request, env, { error: 'Player not found' }, 404);
         const next = RANKS.indexOf(player.rank) + (action === 'promote' ? 1 : -1);
         if (next < 0 || next >= RANKS.length) return reply(request, env, { error: action === 'promote' ? 'Already at highest rank' : 'Already at lowest rank' }, 400);
+        const updated = { ...player, rank: RANKS[next] };
         await env.DB.prepare('UPDATE players SET rank = ? WHERE id = ?').bind(RANKS[next], id).run();
-        return reply(request, env, { ...player, rank: RANKS[next] });
+        await recordActivity(env, { entity_type: 'player', entity_id: id, action: action === 'promote' ? 'promoted' : 'demoted', description: player.name + ' ' + action + 'd from ' + player.rank + ' to ' + updated.rank, before: player, after: updated });
+        return reply(request, env, updated);
       }
       if (!action && method === 'GET') {
         const player = await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(id).first();
@@ -133,10 +206,16 @@ async function route(request, env, ctx) {
         const value = (key, fallback) => body[key] !== undefined ? body[key] : fallback;
         await env.DB.prepare('UPDATE players SET name=?,rank=?,power=?,kingdom=?,last_active=?,contributions=?,notes=?,joined_date=?,status=?,gge_player_id=? WHERE id=?')
           .bind(String(value('name', old.name) || old.name).trim(), RANKS.includes(body.rank) ? body.rank : old.rank, num(value('power', old.power)), num(value('kingdom', old.kingdom), 1), value('last_active', old.last_active), num(value('contributions', old.contributions)), value('notes', old.notes), value('joined_date', old.joined_date), ['Active','Inactive','Warning','Kicked'].includes(body.status) ? body.status : old.status, value('gge_player_id', old.gge_player_id || ''), id).run();
-        return reply(request, env, await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(id).first());
+        const updated = await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(id).first();
+        await recordActivity(env, { entity_type: 'player', entity_id: id, action: 'updated', description: 'Updated player: ' + updated.name, before: old, after: updated });
+        return reply(request, env, updated);
       }
       if (!action && method === 'DELETE') {
+        const player = await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(id).first();
+        if (!player) return reply(request, env, { error: 'Player not found' }, 404);
+        const scores = await env.DB.prepare('SELECT * FROM event_scores WHERE player_id=?').bind(id).all();
         await env.DB.prepare('DELETE FROM players WHERE id = ?').bind(id).run();
+        await recordActivity(env, { entity_type: 'player', entity_id: id, action: 'deleted', description: 'Removed player: ' + player.name, before: { player, event_scores: scores.results || [] }, after: null });
         return reply(request, env, { success: true, message: 'Player removed' });
       }
     }
@@ -146,7 +225,9 @@ async function route(request, env, ctx) {
       if (!String(b.name || '').trim()) return reply(request, env, { error: 'Player name is required' }, 400);
       const inserted = await env.DB.prepare('INSERT INTO players (name,rank,power,kingdom,last_active,contributions,notes,joined_date,status,gge_player_id) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .bind(String(b.name).trim(), RANKS.includes(b.rank) ? b.rank : 'Member', num(b.power), num(b.kingdom,1), b.last_active || today(), num(b.contributions), b.notes || '', b.joined_date || today(), ['Active','Inactive','Warning','Kicked'].includes(b.status) ? b.status : 'Active', b.gge_player_id || '').run();
-      return reply(request, env, await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(inserted.meta.last_row_id).first(), 201);
+      const player = await env.DB.prepare('SELECT * FROM players WHERE id = ?').bind(inserted.meta.last_row_id).first();
+      await recordActivity(env, { entity_type: 'player', entity_id: player.id, action: 'created', description: 'Added player: ' + player.name, before: null, after: player });
+      return reply(request, env, player, 201);
     }
 
     if (path === '/api/events' && method === 'GET') {
@@ -163,27 +244,36 @@ async function route(request, env, ctx) {
       const b = await bodyJson(request);
       if (!b.player_id || !b.event_name) return reply(request, env, { error: 'player_id and event_name are required' }, 400);
       const date = b.event_date ? String(b.event_date).slice(0,10) : today();
-      const old = await env.DB.prepare('SELECT id FROM event_scores WHERE player_id=? AND event_name=? AND event_date=?').bind(b.player_id,b.event_name,date).first();
+      const old = await env.DB.prepare('SELECT * FROM event_scores WHERE player_id=? AND event_name=? AND event_date=?').bind(b.player_id,b.event_name,date).first();
+      let scoreId;
       if (old) {
+        scoreId = old.id;
         await env.DB.prepare('UPDATE event_scores SET event_points=?,glory_points=?,event_rank=?,quota=?,notes=? WHERE id=?')
           .bind(num(b.event_points),num(b.glory_points),num(b.event_rank),num(b.quota),b.notes || '',old.id).run();
       } else {
-        await env.DB.prepare('INSERT INTO event_scores (player_id,event_name,event_date,event_points,glory_points,event_rank,quota,notes) VALUES (?,?,?,?,?,?,?,?)')
+        const inserted = await env.DB.prepare('INSERT INTO event_scores (player_id,event_name,event_date,event_points,glory_points,event_rank,quota,notes) VALUES (?,?,?,?,?,?,?,?)')
           .bind(b.player_id,b.event_name,date,num(b.event_points),num(b.glory_points),num(b.event_rank),num(b.quota),b.notes || '').run();
+        scoreId = inserted.meta.last_row_id;
       }
+      const score = await env.DB.prepare('SELECT * FROM event_scores WHERE id=?').bind(scoreId).first();
+      await recordActivity(env, { entity_type: 'score', entity_id: scoreId, action: old ? 'updated' : 'created', description: (old ? 'Updated score for ' : 'Logged score for ') + b.event_name + ' (' + date + ')', before: old, after: score });
       return reply(request, env, { success: true });
     }
     match = path.match(/^\/api\/events\/score\/(\d+)$/);
     if (match && method === 'DELETE') {
-      await env.DB.prepare('DELETE FROM event_scores WHERE id=?').bind(Number(match[1])).run();
+      const id = Number(match[1]);
+      const score = await env.DB.prepare('SELECT * FROM event_scores WHERE id=?').bind(id).first();
+      if (!score) return reply(request, env, { error: 'Score not found' }, 404);
+      await env.DB.prepare('DELETE FROM event_scores WHERE id=?').bind(id).run();
+      await recordActivity(env, { entity_type: 'score', entity_id: id, action: 'deleted', description: 'Deleted score for ' + score.event_name + ' (' + score.event_date + ')', before: score, after: null });
       return reply(request, env, { success: true });
     }
 
     if (path === '/api/vault' && method === 'GET') {
       const search = (url.searchParams.get('search') || '').trim();
       const result = search
-        ? await env.DB.prepare('SELECT * FROM castle_accounts WHERE castle_name LIKE ? OR account_name LIKE ? OR sitter LIKE ? ORDER BY castle_name').bind(`%${search}%`,`%${search}%`,`%${search}%`).all()
-        : await env.DB.prepare('SELECT * FROM castle_accounts ORDER BY castle_name').all();
+        ? await env.DB.prepare('SELECT * FROM castle_accounts WHERE deleted_at IS NULL AND (castle_name LIKE ? OR account_name LIKE ? OR sitter LIKE ?) ORDER BY castle_name').bind(`%${search}%`,`%${search}%`,`%${search}%`).all()
+        : await env.DB.prepare('SELECT * FROM castle_accounts WHERE deleted_at IS NULL ORDER BY castle_name').all();
       return reply(request, env, result.results || []);
     }
     if (path === '/api/vault' && method === 'POST') {
@@ -192,7 +282,9 @@ async function route(request, env, ctx) {
       const now = today();
       const result = await env.DB.prepare('INSERT INTO castle_accounts (castle_name,account_name,password,realm,sitter,notes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
         .bind(String(b.castle_name).trim(),String(b.account_name).trim(),b.password,b.realm || '',b.sitter || '',b.notes || '',now,now).run();
-      return reply(request, env, await env.DB.prepare('SELECT * FROM castle_accounts WHERE id=?').bind(result.meta.last_row_id).first(), 201);
+      const account = await env.DB.prepare('SELECT * FROM castle_accounts WHERE id=?').bind(result.meta.last_row_id).first();
+      await recordActivity(env, { entity_type: 'vault', entity_id: account.id, action: 'created', description: 'Added vault account: ' + account.castle_name, before: null, after: account });
+      return reply(request, env, account, 201);
     }
     match = path.match(/^\/api\/vault\/(\d+)$/);
     if (match && method === 'PUT') {
@@ -201,10 +293,18 @@ async function route(request, env, ctx) {
       if (!old) return reply(request, env, { error: 'Not found' }, 404);
       await env.DB.prepare('UPDATE castle_accounts SET castle_name=?,account_name=?,password=?,realm=?,sitter=?,notes=?,updated_at=? WHERE id=?')
         .bind(b.castle_name || old.castle_name,b.account_name || old.account_name,b.password || old.password,b.realm !== undefined ? b.realm : old.realm,b.sitter !== undefined ? b.sitter : old.sitter,b.notes !== undefined ? b.notes : old.notes,today(),id).run();
-      return reply(request, env, await env.DB.prepare('SELECT * FROM castle_accounts WHERE id=?').bind(id).first());
+      const account = await env.DB.prepare('SELECT * FROM castle_accounts WHERE id=?').bind(id).first();
+      const passwordChanged = b.password !== undefined && b.password !== old.password;
+      const detail = 'Updated vault account: ' + account.castle_name + (passwordChanged ? ' (password changed; value excluded from history)' : '');
+      await recordActivity(env, { entity_type: 'vault', entity_id: id, action: 'updated', description: detail, before: old, after: account, undoable: !passwordChanged });
+      return reply(request, env, account);
     }
     if (match && method === 'DELETE') {
-      await env.DB.prepare('DELETE FROM castle_accounts WHERE id=?').bind(Number(match[1])).run();
+      const id = Number(match[1]);
+      const account = await env.DB.prepare('SELECT * FROM castle_accounts WHERE id=?').bind(id).first();
+      if (!account) return reply(request, env, { error: 'Vault entry not found' }, 404);
+      await env.DB.prepare('UPDATE castle_accounts SET deleted_at=? WHERE id=?').bind(new Date().toISOString(), id).run();
+      await recordActivity(env, { entity_type: 'vault', entity_id: id, action: 'deleted', description: 'Removed vault account: ' + account.castle_name, before: account, after: null });
       return reply(request, env, { success: true });
     }
 
