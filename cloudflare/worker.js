@@ -109,7 +109,7 @@ async function route(request, env, ctx) {
     return reply(request, env, { error: 'Password required' }, 401);
 
   try {
-
+    let match;
     if (path === '/api/activity' && method === 'GET') {
       const limit = Math.min(100, Math.max(1, num(url.searchParams.get('limit'), 50)));
       const result = await env.DB.prepare('SELECT id,occurred_at,entity_type,entity_id,action,description,undone_at,is_undoable FROM activity_log ORDER BY id DESC LIMIT ?').bind(limit).all();
@@ -173,7 +173,7 @@ async function route(request, env, ctx) {
       return reply(request, env, result.results || []);
     }
 
-    let match = path.match(/^\/api\/players\/(\d+)(?:\/(promote|demote|gge-link|events))?$/);
+    match = path.match(/^\/api\/players\/(\d+)(?:\/(promote|demote|gge-link|events))?$/);
     if (match) {
       const id = Number(match[1]), action = match[2];
       if (action === 'events' && method === 'GET') {
