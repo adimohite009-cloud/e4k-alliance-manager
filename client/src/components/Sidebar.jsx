@@ -6,7 +6,7 @@ const NAV = [
   { id: 'events', icon: '📊', label: 'Event Scores' },
   { id: 'vault',  icon: '🔐', label: 'Password Vault' },
   { id: 'activity', icon: '🕘', label: 'Activity History' },
-  { id: 'recruit-review', icon: '🧭', label: 'Applicant Review' },
+  { id: 'recruit-review', icon: '🧭', label: 'Player Performance' },
 ];
 
 export default function Sidebar({ currentView, onNavigate, isOpen }) {
