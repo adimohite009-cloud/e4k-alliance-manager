@@ -209,10 +209,22 @@ async function rosterPerformanceReview(env) {
           : `Recorded gains in ${p.events} of 6 tracked event categories`;
   }
   const insufficientData = [...scored.filter(p=>p.score===null),...untracked];
+  const contributionOrder = [...ranked].sort((a,b)=>b.score-a.score || a.name.localeCompare(b.name));
+  const positions = new Map(contributionOrder.map((p,i)=>[p.playerId,i+1]));
+  const ratingFor = score => score >= 80 ? 'Promotion consideration'
+    : score >= 60 ? 'Strong contribution'
+    : score >= 40 ? 'Steady contribution'
+    : 'Building contribution';
+  const allMemberRatings = [
+    ...contributionOrder.map(p=>({...p,position:positions.get(p.playerId),rating:ratingFor(p.score)})),
+    ...scored.filter(p=>p.score===null).map(p=>({...p,position:null,rating:'Insufficient data'})),
+    ...untracked.map(p=>({...p,position:null,rating:'Insufficient data'}))
+  ];
   return {
     periodDays:14,generatedAt:new Date().toISOString(),activeMembers:players.length,
     linkedMembers:linked.length,rankedMembers:ranked.length,
     lowestPerforming:ranked[0]||null,needsFollowUp:ranked.slice(0,10),insufficientData,
+    allMemberRatings,
     note:'This activity report is a conversation aid, not a verdict. Scores compare observed event and loot gains within this alliance over the last 14 days. Confirm context with the player before taking action.'
   };
 }
