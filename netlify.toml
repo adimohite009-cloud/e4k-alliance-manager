@@ -2,3 +2,6 @@
   base = "client"
   command = "npm run build"
   publish = "dist"
+
+[build.environment]
+  VITE_API_BASE_URL = "https://e4k-alliance-api.adimohite009.workers.dev"
