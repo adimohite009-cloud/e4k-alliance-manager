@@ -235,7 +235,7 @@ export default function CastleVault({ showToast }) {
 
       {/* Warning banner */}
       <div className="vault-warning">
-        ⚠️ <strong>Keep this tab private.</strong> Passwords are stored locally on your device only. Do not share your screen while this page is open.
+        ⚠️ <strong>Keep this tab private.</strong> This vault is shared with alliance members who enter the shared password. Only share it with trusted members.
       </div>
 
       {/* Search */}
