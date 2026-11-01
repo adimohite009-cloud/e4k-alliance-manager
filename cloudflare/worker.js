@@ -97,14 +97,14 @@ function parseGgeTime(value) {
   return Number.isFinite(parsed) ? parsed : NaN;
 }
 
-function trackerRows(payload) {
+function trackerRows(payload, ownerId = null) {
   const rows = [];
   const points = payload?.points;
   if (!points || typeof points !== 'object') return rows;
   for (const [series, values] of Object.entries(points)) {
     if (!Array.isArray(values)) continue;
     for (const row of values) {
-      const playerId = row?.player_id ?? row?.playerId ?? payload?.player_id ?? payload?.playerId;
+      const playerId = row?.player_id ?? row?.playerId ?? payload?.player_id ?? payload?.playerId ?? ownerId;
       const time = parseGgeTime(String(row?.date ?? row?.created_at ?? row?.timestamp ?? ''));
       const point = Number(row?.point ?? row?.value ?? row?.score);
       if (playerId != null && Number.isFinite(time) && Number.isFinite(point)) rows.push({ series, playerId: String(playerId), time, point });
@@ -163,7 +163,7 @@ async function recruitReview(env, candidateId) {
   ]);
   const memberIds = new Set(members.map(p => String(p.gge_player_id)));
   const memberGains = trackerGains(trackerRows(allianceData), memberIds, since);
-  const candidateRows = trackerRows(candidateData);
+  const candidateRows = trackerRows(candidateData, candidateId);
   // Some player-stat responses omit player_id because the requested ID is the series owner.
   const candidateIdSet = new Set([candidateId]);
   const candidateGains = trackerGains(candidateRows.map(r => ({...r,playerId:candidateId})), candidateIdSet, since);
