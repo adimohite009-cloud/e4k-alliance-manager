@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# SQLite database (contains real passwords — keep local only)
+server/alliance.db
+server/alliance.db-shm
+server/alliance.db-wal
+
+# Build output
+client/dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.production
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp scripts
+server/import_*.js
+server/seed_*.js
+server/check_db.js
