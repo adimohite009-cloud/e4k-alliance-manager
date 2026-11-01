@@ -5,6 +5,7 @@ import PlayerRoster from './components/PlayerRoster';
 import EventScores from './components/EventScores';
 import CastleVault from './components/CastleVault';
 import ActivityLog from './components/ActivityLog';
+import RecruitReview from './components/RecruitReview';
 
 export default function App() {
   const [view, setView] = useState('roster');
@@ -42,6 +43,7 @@ export default function App() {
           {view === 'events'  && <EventScores showToast={showToast} />}
           {view === 'vault'   && <CastleVault showToast={showToast} />}
           {view === 'activity' && <ActivityLog showToast={showToast} />}
+          {view === 'recruit-review' && <RecruitReview />}
         </div>
       </div>
 
