@@ -145,10 +145,11 @@ async function fetchTrackerStats(path) {
   return response.json();
 }
 
-async function recruitReview(env, candidateId) {
-  const roster = await env.DB.prepare("SELECT id,name,rank,status,gge_player_id,joined_date FROM players WHERE status='Active'").all();
-  const members = (roster.results || []).filter(p => p.gge_player_id && String(p.gge_player_id) !== candidateId);
-  if (!members.length) throw new Error('No active roster members have linked GGE Tracker IDs.');
+async function rosterPerformanceReview(env) {
+  const roster = await env.DB.prepare("SELECT id,name,rank,status,gge_player_id,joined_date FROM players WHERE status='Active' ORDER BY name").all();
+  const players = roster.results || [];
+  const linked = players.filter(p => p.gge_player_id);
+  if (!linked.length) throw new Error('No active roster members have linked GGE Tracker IDs.');
   const eventSeries = [
     'player_event_berimond_invasion_history','player_event_berimond_kingdom_history',
     'player_event_bloodcrow_history','player_event_nomad_history','player_event_samurai_history',
@@ -156,56 +157,63 @@ async function recruitReview(env, candidateId) {
   ];
   const series = [...eventSeries, 'player_loot_history'];
   const params = new URLSearchParams({ events: series.join(','), limit: '20000' });
+  const data = await fetchTrackerStats(`/statistics/alliance/${ALLIANCE_ID}?${params}`);
   const since = Date.now() - 14 * 86400000;
-  const [allianceData, candidateData] = await Promise.all([
-    fetchTrackerStats(`/statistics/alliance/${ALLIANCE_ID}?${params}`),
-    fetchTrackerStats(`/statistics/player/${encodeURIComponent(candidateId)}?${new URLSearchParams({events:series.join(','),since:'14',dedup:'true'})}`)
-  ]);
-  const memberIds = new Set(members.map(p => String(p.gge_player_id)));
-  const memberGains = trackerGains(trackerRows(allianceData), memberIds, since);
-  const candidateRows = trackerRows(candidateData, candidateId);
-  // Some player-stat responses omit player_id because the requested ID is the series owner.
-  const candidateIdSet = new Set([candidateId]);
-  const candidateGains = trackerGains(candidateRows.map(r => ({...r,playerId:candidateId})), candidateIdSet, since);
-  const allIds = [...members.map(p=>String(p.gge_player_id)), candidateId];
-  const byPlayer = new Map(allIds.map(id => [id, {id,events:0,eventSeries:0,loot:0,samples:0,percentiles:[]}]));
+  const ids = new Set(linked.map(p => String(p.gge_player_id)));
+  const gains = trackerGains(trackerRows(data), ids, since);
+  const metrics = new Map(linked.map(p => [String(p.gge_player_id), {
+    ggePlayerId:String(p.gge_player_id), playerId:p.id, name:p.name, rank:p.rank,
+    events:0, eventSeries:0, loot:0, samples:0, percentiles:[]
+  }]));
+  const percentile = (values, id) => {
+    const value = values.find(item => item.id === id);
+    return value ? Math.round(values.filter(item => item.value <= value.value).length / values.length * 100) : null;
+  };
   for (const event of eventSeries) {
-    const values = allIds.map(id => ({id, stat: id===candidateId ? candidateGains.get(event+':'+id) : memberGains.get(event+':'+id)}));
-    const observed = values.filter(x=>x.stat && x.stat.samples>0);
-    if (!observed.length) continue;
-    const ranked = [...observed].sort((a,b)=>a.stat.gain-b.stat.gain);
-    for (const item of observed) {
-      const p = byPlayer.get(item.id);
-      p.eventSeries++;
-      p.samples += item.stat.samples;
-      if (item.stat.participated) p.events++;
-      const rank = ranked.filter(x=>x.stat.gain<=item.stat.gain).length;
-      p.percentiles.push(Math.round(rank / ranked.length * 100));
+    const values = [];
+    for (const id of ids) {
+      const stat = gains.get(event + ':' + id);
+      if (!stat || stat.samples < 2) continue;
+      const player = metrics.get(id);
+      player.eventSeries++;
+      player.samples += stat.samples;
+      if (stat.gain > 0) player.events++;
+      values.push({id,value:stat.gain});
     }
+    for (const item of values) metrics.get(item.id).percentiles.push(percentile(values,item.id));
   }
-  const lootValues=allIds.map(id=>({id,stat:id===candidateId?candidateGains.get('player_loot_history:'+id):memberGains.get('player_loot_history:'+id)})).filter(x=>x.stat);
-  if (lootValues.length) {
-    for(const item of lootValues) {
-      const p=byPlayer.get(item.id); p.loot=item.stat.gain; p.samples+=item.stat.samples;
-      const rank=lootValues.filter(x=>x.stat.gain<=item.stat.gain).length;
-      p.percentiles.push(Math.round(rank/lootValues.length*100));
-    }
+  const lootValues = [];
+  for (const id of ids) {
+    const stat = gains.get('player_loot_history:' + id);
+    if (!stat || stat.samples < 2) continue;
+    const player = metrics.get(id);
+    player.loot = stat.gain;
+    player.samples += stat.samples;
+    lootValues.push({id,value:stat.gain});
   }
-  const scored = [...byPlayer.values()].map(p=>({...p,score:p.percentiles.length?Math.round(p.percentiles.reduce((a,b)=>a+b,0)/p.percentiles.length):null}));
-  const memberByGge=new Map(members.map(p=>[String(p.gge_player_id),p]));
-  const candidate=scored.find(p=>p.id===candidateId);
-  const replaceable=scored.filter(p=>{
-    const player=memberByGge.get(p.id);
-    return player && !['Leader','Co-Leader','Officer'].includes(player.rank) && p.score!==null;
-  }).sort((a,b)=>a.score-b.score);
-  const details=p=>({...p,name:p.id===candidateId?'Applicant':memberByGge.get(p.id)?.name||'Member',rank:memberByGge.get(p.id)?.rank||'Applicant',ggePlayerId:p.id});
-  const eligible=replaceable.map(details);
+  for (const item of lootValues) metrics.get(item.id).percentiles.push(percentile(lootValues,item.id));
+  const scored = [...metrics.values()].map(p => ({
+    ...p,
+    score: p.percentiles.length >= 2 ? Math.round(p.percentiles.reduce((a,b)=>a+b,0)/p.percentiles.length) : null,
+    confidence: p.percentiles.length >= 4 ? 'moderate' : p.percentiles.length >= 2 ? 'low' : 'insufficient'
+  })).sort((a,b) => (a.score ?? 101) - (b.score ?? 101));
+  const ranked = scored.filter(p=>p.score!==null);
+  const untracked = players.filter(p=>!p.gge_player_id).map(p=>({playerId:p.id,name:p.name,rank:p.rank,score:null,events:0,eventSeries:0,loot:0,samples:0,confidence:'insufficient',reason:'No GGE Tracker ID linked'}));
+  for (const p of scored) {
+    p.reason = p.confidence === 'insufficient'
+      ? 'Not enough recent tracker history to rate fairly'
+      : p.events === 0 && p.loot === 0
+        ? 'No event gains or loot gains recorded in the observed history'
+        : p.events === 0
+          ? 'No positive score gains detected in the tracked event categories'
+          : `Recorded gains in ${p.events} of 6 tracked event categories`;
+  }
+  const insufficientData = [...scored.filter(p=>p.score===null),...untracked];
   return {
-    periodDays:14, generatedAt:new Date().toISOString(), candidate:details(candidate||{id:candidateId,score:null,events:0,eventSeries:0,loot:0,samples:0}),
-    recommendedReview:eligible[0]||null, alternatives:eligible.slice(0,5),
-    eligibleMembers:eligible.length, trackedMembers:members.length,
-    confidence: candidate?.eventSeries>=3 && candidate?.samples>=4 ? 'moderate' : 'low',
-    note:'This is an activity comparison for officer review, not an automatic removal. Missing tracker data is not treated as inactivity; leadership ranks are excluded from replacement suggestions.'
+    periodDays:14,generatedAt:new Date().toISOString(),activeMembers:players.length,
+    linkedMembers:linked.length,rankedMembers:ranked.length,
+    lowestPerforming:ranked[0]||null,needsFollowUp:ranked.slice(0,10),insufficientData,
+    note:'This activity report is a conversation aid, not a verdict. Scores compare observed event and loot gains within this alliance over the last 14 days. Confirm context with the player before taking action.'
   };
 }
 
@@ -272,13 +280,7 @@ async function route(request, env, ctx) {
       return reply(request, env, { success: true });
     }
 
-    if (path === '/api/recruit-review' && method === 'GET') {
-      const candidateId = (url.searchParams.get('playerId') || '').trim();
-      if (!/^\d{5,20}$/.test(candidateId)) return reply(request, env, { error: 'Enter a valid GGE Tracker player ID (5–20 digits).' }, 400);
-      return reply(request, env, await recruitReview(env, candidateId));
-    }
-
-    if (path === '/api/stats' && method === 'GET') {
+    if (path === '/api/performance-review' && method === 'GET') {\n      return reply(request, env, await rosterPerformanceReview(env));\n    }\n\n    if (path === '/api/stats' && method === 'GET') {
       const totals = await env.DB.prepare('SELECT COUNT(*) AS totalPlayers, COALESCE(SUM(power),0) AS totalPower, COALESCE(AVG(power),0) AS avgPower FROM players').first();
       const active = await env.DB.prepare("SELECT COUNT(*) AS activePlayers FROM players WHERE status = 'Active'").first();
       return reply(request, env, { totalPlayers: num(totals.totalPlayers), activePlayers: num(active.activePlayers), totalPower: num(totals.totalPower), avgPower: Math.round(num(totals.avgPower)) });
