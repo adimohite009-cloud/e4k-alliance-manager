@@ -250,6 +250,7 @@ function ConfirmDialog({ message, onConfirm, onCancel }) {
 export default function PlayerRoster({ showToast }) {
   const [players, setPlayers]           = useState([]);
   const [loading, setLoading]           = useState(true);
+  const [loadError, setLoadError]       = useState('');
   const [search, setSearch]             = useState('');
   const [filterRank, setFilterRank]     = useState('All');
   const [filterStatus, setFilterStatus] = useState('All');
@@ -266,9 +267,15 @@ export default function PlayerRoster({ showToast }) {
       if (filterRank   !== 'All') params.set('rank',   filterRank);
       if (filterStatus !== 'All') params.set('status', filterStatus);
       const res = await fetch(`/api/players?${params}`);
-      setPlayers(await res.json());
-    } catch {
-      showToast('Failed to load players', 'error');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
+      if (!Array.isArray(data)) throw new Error('The server returned invalid roster data.');
+      setPlayers(data);
+      setLoadError('');
+    } catch (error) {
+      setPlayers([]);
+      setLoadError(error.message || 'Failed to load players');
+      showToast(error.message || 'Failed to load players', 'error');
     } finally {
       setLoading(false);
     }
@@ -343,6 +350,8 @@ export default function PlayerRoster({ showToast }) {
 
       {/* Auto-Sync Bar */}
       <SyncStatusBar showToast={showToast} onSynced={load} />
+
+      {loadError && <div role="alert" className="activity-note" style={{ borderColor: 'var(--danger)', color: '#f87171' }}>Roster could not load: {loadError}</div>}
 
       {/* Search + Filter Toolbar */}
       <div className="toolbar">
