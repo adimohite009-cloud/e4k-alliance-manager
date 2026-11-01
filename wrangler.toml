@@ -1,0 +1,15 @@
+name = "e4k-alliance-api"
+main = "cloudflare/worker.js"
+compatibility_date = "2026-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "e4k-alliance"
+database_id = "db877491-9a6a-4cba-aa10-241bc48a3ed6"
+migrations_dir = "cloudflare/migrations"
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[vars]
+APP_ORIGIN = "https://e4k-alliance-maanger.netlify.app"
