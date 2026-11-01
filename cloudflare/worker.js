@@ -274,7 +274,7 @@ async function route(request, env, ctx) {
 
     if (path === '/api/recruit-review' && method === 'GET') {
       const candidateId = (url.searchParams.get('playerId') || '').trim();
-      if (!/^\\d{5,20}$/.test(candidateId)) return reply(request, env, { error: 'Enter a valid GGE Tracker player ID (5–20 digits).' }, 400);
+      if (!/^\d{5,20}$/.test(candidateId)) return reply(request, env, { error: 'Enter a valid GGE Tracker player ID (5–20 digits).' }, 400);
       return reply(request, env, await recruitReview(env, candidateId));
     }
 
