@@ -322,3 +322,42 @@ button, select, input { touch-action: manipulation; }
   .mobile-title { font-size: 1rem; }
   .btn { padding: 9px 12px; }
 }
+
+
+@media print {
+  @page { size: landscape; margin: 12mm; }
+  html, body, #root {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #111 !important;
+  }
+  .app-shell, .main-area, .view-content {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    min-height: 0 !important;
+    background: #fff !important;
+    color: #111 !important;
+  }
+  .view-content { padding: 0 !important; }
+  .sidebar, .mobile-header, .no-print, button[aria-label="Lock alliance dashboard"] {
+    display: none !important;
+  }
+  .card {
+    background: #fff !important;
+    color: #111 !important;
+    border-color: #aaa !important;
+    box-shadow: none !important;
+    break-inside: auto;
+  }
+  h1, h2, h3, p, span, strong, td, th, label {
+    color: #111 !important;
+  }
+  .table-wrap { overflow: visible !important; }
+  table { font-size: 8pt; }
+  th, td { border-color: #aaa !important; }
+  a { color: #111 !important; text-decoration: none !important; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}

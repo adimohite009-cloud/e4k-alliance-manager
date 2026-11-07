@@ -139,6 +139,61 @@ function trackerGains(rows, ids, since) {
   return result;
 }
 
+function trackerWeeklyTrends(rows, players, eventSeries, weekCount, now, isCurrent) {
+  const weekMs = 7 * 86400000;
+  const tracked = new Set([...eventSeries, 'player_loot_history']);
+  const result = new Map();
+  for (const player of players) {
+    const id = String(player.gge_player_id);
+    const end = isCurrent(player) ? now : Date.parse(player.departed_at || '');
+    if (!Number.isFinite(end)) { result.set(id, []); continue; }
+    const start = end - weekMs * weekCount;
+    const bySeries = new Map();
+    for (const row of rows) {
+      if (row.playerId !== id || !tracked.has(row.series) || row.time > end) continue;
+      if (!bySeries.has(row.series)) bySeries.set(row.series, []);
+      bySeries.get(row.series).push(row);
+    }
+    const hasWeeklySamples = [...bySeries.values()].some(values => values.filter(row=>row.time>=start).length>=2);
+    if (!hasWeeklySamples) { result.set(id, []); continue; }
+    const weekly = Array.from({length:weekCount},(_,index)=>({
+      start:new Date(start + index * weekMs).toISOString(),
+      end:new Date(start + (index + 1) * weekMs).toISOString(),
+      eventCategories:0,eventPoints:0,lootGained:0
+    }));
+    const categoryGains = new Map();
+    for (const [series, values] of bySeries) {
+      values.sort((a,b)=>a.time-b.time);
+      let previous;
+      for (const row of values) {
+        if (row.time < start) { previous = row.point; continue; }
+        const index = Math.floor((row.time - start) / weekMs);
+        if (index < 0 || index >= weekCount) { previous = row.point; continue; }
+        if (previous !== undefined) {
+          const delta = row.point - previous;
+          if (delta > 0) {
+            if (series === 'player_loot_history') weekly[index].lootGained += delta;
+            else {
+              weekly[index].eventPoints += delta;
+              const key = index + ':' + series;
+              categoryGains.set(key,(categoryGains.get(key)||0)+delta);
+            }
+          }
+        }
+        previous = row.point;
+      }
+    }
+    for (const [key,gain] of categoryGains) {
+      if (gain > 0) {
+        const index = Number(key.slice(0,key.indexOf(':')));
+        weekly[index].eventCategories++;
+      }
+    }
+    result.set(id,weekly);
+  }
+  return result;
+}
+
 async function fetchTrackerStats(path) {
   const response = await fetch(`${GGE_API}${path}`, { headers: GGE_HEADERS });
   if (!response.ok) throw new Error(`GGE Tracker statistics returned HTTP ${response.status}`);
@@ -195,7 +250,9 @@ async function rosterPerformanceReview(env) {
   const data = await fetchTrackerStats(`/statistics/alliance/${ALLIANCE_ID}?${params}`);
   const since = Date.now() - 14 * 86400000;
   const ids = new Set(linked.map(p => String(p.gge_player_id)));
-  const gains = trackerGains(trackerRows(data), ids, since);
+  const trackerDataRows = trackerRows(data);
+  const gains = trackerGains(trackerDataRows, ids, since);
+  const weeklyTrends = trackerWeeklyTrends(trackerDataRows, linked, eventSeries, 13, Date.now(), currentMember);
   const metrics = new Map(linked.map(p => [String(p.gge_player_id), {
     ggePlayerId:String(p.gge_player_id), playerId:p.id, name:p.name, rank:p.rank, status:p.status, joinedDate:p.joined_date, departedAt:p.departed_at || '',
     events:0, eventSeries:0, loot:0, samples:0, percentiles:[]
@@ -227,6 +284,11 @@ async function rosterPerformanceReview(env) {
     lootValues.push({id,value:stat.gain});
   }
   for (const item of lootValues) metrics.get(item.id).percentiles.push(percentile(lootValues,item.id));
+  for (const player of linked) {
+    const id = String(player.gge_player_id);
+    const metric = metrics.get(id);
+    if (metric) metric.weeklyTrend = weeklyTrends.get(id) || [];
+  }
   const scored = [...metrics.values()].map(p => ({
     ...p,
     score: p.percentiles.length >= 2 ? Math.round(p.percentiles.reduce((a,b)=>a+b,0)/p.percentiles.length) : null,
