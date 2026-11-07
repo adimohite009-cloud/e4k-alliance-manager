@@ -56,7 +56,8 @@ export default function RecruitReview() {
     {report && <>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(165px,1fr))',gap:12,marginBottom:16}}>
         {[
-          {label:'Active members',value:report.activeMembers},
+          {label:'Current members',value:report.activeMembers},
+          {label:'Former members',value:report.formerMembers ?? 0},
           {label:'Linked to GGE Tracker',value:report.linkedMembers},
           {label:'Enough data to compare',value:report.rankedMembers}
         ].map(item=><div className="card" key={item.label}><div style={{fontSize:'1.5rem',fontWeight:800,color:'var(--gold)'}}>{item.value}</div><div style={{color:'var(--text-muted)',fontSize:'.8rem'}}>{item.label}</div></div>)}
@@ -76,7 +77,7 @@ export default function RecruitReview() {
 
         <div className="card" style={{marginBottom:16}}>
           <h2 style={{fontSize:'1.05rem',marginBottom:10}}>Members to check in with</h2>
-          {report.needsFollowUp.length ? <div className="table-wrap"><table><thead><tr><th>Member</th><th>Rank</th><th>Relative score</th><th>Event categories</th><th>Loot gained</th><th>Data confidence</th><th>Reason</th><th>Profile</th></tr></thead>
+          {report.needsFollowUp.length ? <div className="table-wrap"><table><thead><tr><th>Member</th><th>Rank</th><th>Relative score</th><th>Event categories</th><th>Loot gained</th><th>Data confidence</th><th>Reason</th><th>Joined</th><th>Left roster</th><th>Profile</th></tr></thead>
             <tbody>{report.needsFollowUp.map((p,i)=><tr key={p.playerId}><td>{i===0?'⚠️ ':''}{p.name}</td><td>{p.rank}</td><td>{p.score}/100</td><td>{p.events}/6</td><td>{fmt(p.loot)}</td><td>{p.confidence}</td><td>{p.reason}</td><td><a href={profile(p.ggePlayerId)} target="_blank" rel="noreferrer">Open ↗</a></td></tr>)}</tbody>
           </table></div> : <p style={{color:'var(--text-muted)'}}>No member has enough recent history for a comparison.</p>}
         </div>
@@ -94,14 +95,14 @@ export default function RecruitReview() {
         </div>
 
         <div className="card" style={{marginBottom:16}}>
-          <h2 style={{fontSize:'1.05rem',marginBottom:4}}>Full active roster contribution ratings</h2>
-          <p style={{color:'var(--text-muted)',fontSize:'.82rem',marginTop:0}}>Relative score combines each member’s percentile in tracked event gains and loot over 14 days. It does not measure leadership, mentoring, reliability, or teamwork.</p>
-          <div className="table-wrap"><table><thead><tr><th>Position</th><th>Member</th><th>Current rank</th><th>Contribution score</th><th>Rating</th><th>Event categories</th><th>Loot gained</th><th>Data confidence</th><th>Reason</th><th>Profile</th></tr></thead>
+          <h2 style={{fontSize:'1.05rem',marginBottom:4}}>Current and former member contribution ratings</h2>
+          <p style={{color:'var(--text-muted)',fontSize:'.82rem',marginTop:0}}>Relative score combines each player’s percentile in tracked event gains and loot over the last 14 days. Current members appear first; former members are shown below for history. It does not measure leadership, mentoring, reliability, or teamwork.</p>
+          <div className="table-wrap"><table><thead><tr><th>Position</th><th>Member</th><th>Status</th><th>Rank</th><th>Contribution score</th><th>Rating</th><th>Event categories</th><th>Loot gained</th><th>Data confidence</th><th>Reason</th><th>Joined</th><th>Left roster</th><th>Profile</th></tr></thead>
             <tbody>{ratings.map(p=><tr key={p.playerId}>
-              <td>{p.position ? `#${p.position}` : '—'}</td><td>{p.name}</td><td>{p.rank}</td>
+              <td>{p.position ? `#${p.position}` : '—'}</td><td>{p.name}</td><td>{p.status || 'Active'}</td><td>{p.rank}</td>
               <td>{p.score === null || p.score === undefined ? '—' : `${p.score}/100`}</td>
               <td><span style={{fontWeight:700,color:ratingColor(p.rating)}}>{p.rating}</span></td>
-              <td>{p.events ?? 0}/6</td><td>{fmt(p.loot)}</td><td>{p.confidence}</td><td>{p.reason}</td>
+              <td>{p.events ?? 0}/6</td><td>{fmt(p.loot)}</td><td>{p.confidence}</td><td>{p.reason}</td><td>{p.joinedDate || '—'}</td><td>{p.departedAt ? new Date(p.departedAt).toLocaleDateString() : '—'}</td>
               <td>{p.ggePlayerId ? <a href={profile(p.ggePlayerId)} target="_blank" rel="noreferrer">Open ↗</a> : '—'}</td>
             </tr>)}</tbody>
           </table></div>
