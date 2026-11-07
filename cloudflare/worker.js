@@ -146,10 +146,45 @@ async function fetchTrackerStats(path) {
 }
 
 async function rosterPerformanceReview(env) {
-  const roster = await env.DB.prepare("SELECT id,name,rank,status,gge_player_id,joined_date FROM players WHERE status='Active' ORDER BY name").all();
+  const roster = await env.DB.prepare("SELECT id,name,rank,status,gge_player_id,joined_date FROM players ORDER BY name").all();
   const players = roster.results || [];
+  const statusChanges = await env.DB.prepare("SELECT entity_id,occurred_at,before_json,after_json FROM activity_log WHERE entity_type='player' AND action='updated' ORDER BY id DESC LIMIT 1000").all();
+  const departureDates = new Map();
+  for (const entry of (statusChanges.results || [])) {
+    if (departureDates.has(entry.entity_id)) continue;
+    try {
+      const before = JSON.parse(entry.before_json || '{}');
+      const after = JSON.parse(entry.after_json || '{}');
+      if (before.status !== after.status && ['Inactive','Kicked'].includes(after.status)) departureDates.set(entry.entity_id, entry.occurred_at || '');
+    } catch {}
+  }
+  for (const player of players) if (!player.departed_at && ['Inactive','Kicked'].includes(player.status)) player.departed_at = departureDates.get(player.id) || '';
+  const currentTrackerIds = new Set(players.filter(p=>p.gge_player_id).map(p=>String(p.gge_player_id)));
+  const currentNames = new Set(players.map(p=>String(p.name || '').trim().toLocaleLowerCase()));
+  const deleted = await env.DB.prepare("SELECT occurred_at,before_json FROM activity_log WHERE entity_type='player' AND action='deleted' AND before_json IS NOT NULL ORDER BY id DESC").all();
+  const deletedTrackerIds = new Set();
+  const deletedNames = new Set();
+  for (const entry of (deleted.results || [])) {
+    let oldPlayer;
+    try { oldPlayer = JSON.parse(entry.before_json || '{}').player; } catch { continue; }
+    if (!oldPlayer || oldPlayer.id == null || !String(oldPlayer.name || '').trim()) continue;
+    const trackerId = String(oldPlayer.gge_player_id || '');
+    const nameKey = String(oldPlayer.name).trim().toLocaleLowerCase();
+    if ((trackerId && (currentTrackerIds.has(trackerId) || deletedTrackerIds.has(trackerId))) ||
+        (!trackerId && (currentNames.has(nameKey) || deletedNames.has(nameKey)))) continue;
+    players.push({
+      id:oldPlayer.id,name:oldPlayer.name,rank:oldPlayer.rank || 'Member',status:'Former',
+      gge_player_id:oldPlayer.gge_player_id || '',joined_date:oldPlayer.joined_date || '',
+      departed_at:entry.occurred_at || ''
+    });
+    if (trackerId) deletedTrackerIds.add(trackerId);
+    deletedNames.add(nameKey);
+  }
+  const currentMember = p => !['Inactive','Kicked','Former'].includes(p.status);
+  const currentPlayers = players.filter(currentMember);
+  const formerPlayers = players.filter(p=>!currentMember(p));
   const linked = players.filter(p => p.gge_player_id);
-  if (!linked.length) throw new Error('No active roster members have linked GGE Tracker IDs.');
+  if (!linked.length) throw new Error('No current or former roster members have linked GGE Tracker IDs.');
   const eventSeries = [
     'player_event_berimond_invasion_history','player_event_berimond_kingdom_history',
     'player_event_bloodcrow_history','player_event_nomad_history','player_event_samurai_history',
@@ -162,7 +197,7 @@ async function rosterPerformanceReview(env) {
   const ids = new Set(linked.map(p => String(p.gge_player_id)));
   const gains = trackerGains(trackerRows(data), ids, since);
   const metrics = new Map(linked.map(p => [String(p.gge_player_id), {
-    ggePlayerId:String(p.gge_player_id), playerId:p.id, name:p.name, rank:p.rank,
+    ggePlayerId:String(p.gge_player_id), playerId:p.id, name:p.name, rank:p.rank, status:p.status, joinedDate:p.joined_date, departedAt:p.departed_at || '',
     events:0, eventSeries:0, loot:0, samples:0, percentiles:[]
   }]));
   const percentile = (values, id) => {
@@ -198,7 +233,10 @@ async function rosterPerformanceReview(env) {
     confidence: p.percentiles.length >= 4 ? 'moderate' : p.percentiles.length >= 2 ? 'low' : 'insufficient'
   })).sort((a,b) => (a.score ?? 101) - (b.score ?? 101));
   const ranked = scored.filter(p=>p.score!==null);
-  const untracked = players.filter(p=>!p.gge_player_id).map(p=>({playerId:p.id,name:p.name,rank:p.rank,score:null,events:0,eventSeries:0,loot:0,samples:0,confidence:'insufficient',reason:'No GGE Tracker ID linked'}));
+  const isCurrentId = p => currentMember(p);
+  const currentRanked = ranked.filter(isCurrentId);
+  const formerRanked = ranked.filter(p=>!isCurrentId(p));
+  const untracked = players.filter(p=>!p.gge_player_id).map(p=>({playerId:p.id,name:p.name,rank:p.rank,status:p.status,joinedDate:p.joined_date,departedAt:p.departed_at || '',score:null,events:0,eventSeries:0,loot:0,samples:0,confidence:'insufficient',reason:'No GGE Tracker ID linked'}));
   for (const p of scored) {
     p.reason = p.confidence === 'insufficient'
       ? 'Not enough recent tracker history to rate fairly'
@@ -209,21 +247,35 @@ async function rosterPerformanceReview(env) {
           : `Recorded gains in ${p.events} of 6 tracked event categories`;
   }
   const insufficientData = [...scored.filter(p=>p.score===null),...untracked];
-  const contributionOrder = [...ranked].sort((a,b)=>b.score-a.score || a.name.localeCompare(b.name));
-  const positions = new Map(contributionOrder.map((p,i)=>[p.playerId,i+1]));
   const ratingFor = score => score >= 80 ? 'Promotion consideration'
     : score >= 60 ? 'Strong contribution'
     : score >= 40 ? 'Steady contribution'
     : 'Building contribution';
+  const orderByScore = rows => [...rows].sort((a,b)=>b.score-a.score || a.name.localeCompare(b.name));
+  const activeOrder = orderByScore(currentRanked);
+  const formerOrder = orderByScore(formerRanked);
+  const activePositions = new Map(activeOrder.map((p,i)=>[p.playerId,i+1]));
+  const formerPositions = new Map(formerOrder.map((p,i)=>[p.playerId,i+1]));
+  const withRating = (p,position) => ({...p,position,rating:isCurrentId(p)?ratingFor(p.score):'Former contributor'});
+  const insufficientCurrent = [
+    ...scored.filter(p=>p.score===null && isCurrentId(p)),
+    ...untracked.filter(isCurrentId)
+  ].map(p=>({...p,position:null,rating:'Insufficient data'}));
+  const insufficientFormer = [
+    ...scored.filter(p=>p.score===null && !isCurrentId(p)),
+    ...untracked.filter(p=>!isCurrentId(p))
+  ].map(p=>({...p,position:null,rating:'Insufficient data'}));
   const allMemberRatings = [
-    ...contributionOrder.map(p=>({...p,position:positions.get(p.playerId),rating:ratingFor(p.score)})),
-    ...scored.filter(p=>p.score===null).map(p=>({...p,position:null,rating:'Insufficient data'})),
-    ...untracked.map(p=>({...p,position:null,rating:'Insufficient data'}))
+    ...activeOrder.map(p=>withRating(p,activePositions.get(p.playerId))),
+    ...insufficientCurrent,
+    ...formerOrder.map(p=>withRating(p,formerPositions.get(p.playerId))),
+    ...insufficientFormer
   ];
   return {
-    periodDays:14,generatedAt:new Date().toISOString(),activeMembers:players.length,
-    linkedMembers:linked.length,rankedMembers:ranked.length,
-    lowestPerforming:ranked[0]||null,needsFollowUp:ranked.slice(0,10),insufficientData,
+    periodDays:14,generatedAt:new Date().toISOString(),activeMembers:currentPlayers.length,
+    linkedMembers:linked.length,rankedMembers:currentRanked.length,formerMembers:formerPlayers.length,
+    totalMembers:players.length,historicalRankedMembers:formerRanked.length,
+    lowestPerforming:currentRanked[0]||null,needsFollowUp:currentRanked.slice(0,10),insufficientData,
     allMemberRatings,
     note:'This activity report is a conversation aid, not a verdict. Scores compare observed event and loot gains within this alliance over the last 14 days. Confirm context with the player before taking action.'
   };
